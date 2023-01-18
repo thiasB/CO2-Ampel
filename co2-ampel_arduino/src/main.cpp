@@ -9,18 +9,18 @@
 // NewPixel library
 #include <Adafruit_NeoPixel.h>
 
-// WIFi
-#include <ESP8266WiFi.h>
+// WiFiMulti
+#include <ESP8266WiFiMulti.h>
 
-// PubSub MQTT Lib
-#include <PubSubClient.h>
-
+// InfluxDB
+#include <InfluxDbClient.h>
 
 // WiFi config
 #include <wifi_config.h>
 
-// MQTT config
-#include <mqtt_config.h>
+// InfluxDB config
+#include <influxdb_config.h>
+
 
 // CO2 sensor configuration
 #define MHZ19_BAUDRATE  9600    // default baudrate of sensor
@@ -29,29 +29,30 @@
 
 // CO2 thresholds
 #define CO2_THRESHOLD_GOOD    500
-#define CO2_THRESHOLD_MEDIUM  800
-#define CO2_THRESHOLD_BAD     1100
+#define CO2_THRESHOLD_GOOD_MEDIUM    700
+#define CO2_THRESHOLD_MEDIUM  900
+#define CO2_THRESHOLD_MEDIUM_BAD  1100
+#define CO2_THRESHOLD_BAD     1500
+#define CO2_THRESHOLD_DEAD     2000
 
 // NeoPixel configuration
-#define NEOPIXEL_COUNT      12
-#define NEOPIXEL_PIN        D5
-#define NEOPIXEL_BRIGHTNESS 255   // 255 max
+#define NEOPIXEL_COUNT      1
+#define NEOPIXEL_PIN        D2
+#define NEOPIXEL_BRIGHTNESS 5   // 255 max
 
 // application configuration
 #define CONF_WARMUP_TIME_MS             180000  // 180s
 #define CONF_ZERO_CALIBRATION_TIME_MS  1260000 // 21m
-#define CONF_MEASUREMENT_INTERVALL_MS   10000   // 10s
+#define CONF_MEASUREMENT_INTERVALL_MS   300000   // 10s
 #define CONF_ZERO_CALIBRATION_PIN       D3
 
 
 #ifndef WIFI_CONFIG_H
 #error Include a valid wifi_config.h
 #endif
-
-#ifndef MQTT_CONFIG_H
-#error Include a valid mqtt_config.h
+#ifndef INFLUXDB_CONFIG_H
+#error Include a valid wifi_config.h
 #endif
-// TODO: server / username / password handling
 
 
 // SoftwareSerial to communicate with sensor
@@ -63,11 +64,17 @@ MHZ19 mhz19Sensor;
 // NeoPixel strip / ring
 Adafruit_NeoPixel neoPixels(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
-// WiFi client
-WiFiClient wifiClient;
+// WiFi Multi client
+ESP8266WiFiMulti wifiMulti;
 
-// MQTT client
-PubSubClient mqttClient(wifiClient);
+// WiFi connect timeout per AP. Increase when connecting takes longer.
+const uint32_t connectTimeout = 10000;
+
+// InfluxDB client
+InfluxDBClient client(INFLUXDB_SERVER, INFLUXDB_DATABASE);
+
+// InfluxDB Data point
+Point influxsensors("Sensoren");
 
 static const char alphanum[] ="0123456789"
                               "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -81,9 +88,8 @@ bool initalCalibration = true;
 unsigned long initalCalibrationStartTimeMS;
 // Assume Wifi does not work, if connect set to true
 bool wifiConnectionActive = false;
-// Assume Mqtt to Work until proven wrong
-bool attemptMqttConnect = true;
-bool mqttConnectionActive = true;
+// Assume InfluxDB does not work, if connect set to true
+bool influxdbConnectionActive = false;
 
 // different operating modes
 enum APPLICATION_MODE {
@@ -99,7 +105,7 @@ void colorWipe(uint32_t color, int wait);
 void loadingAnimation(uint8_t percent);
 
 // interrupt for zero calibration
-ICACHE_RAM_ATTR void detectZeroCalibrationButtonPush() {
+IRAM_ATTR void detectZeroCalibrationButtonPush() {
   Serial.println("DEBUG: Interrupt");
   currentApplicationMode = MODE_ZERO_CALIBRATION;
   zeroCalibrationStartTimeMS = millis();
@@ -148,34 +154,43 @@ void setup() {
 
   checkSensorReturnCode();
 
-  // WiFi
-#ifdef WIFI_CONFIG_SSID
-    Serial.printf("Setup: WiFi connecting to %s\n\r", WIFI_CONFIG_SSID);
-    #ifndef WIFI_CONFIG_PASSWORD
-      WiFi.begin(WIFI_CONFIG_SSID);
-    #else
-      WiFi.begin(WIFI_CONFIG_SSID, WIFI_CONFIG_PASSWORD);
-    #endif
-  for (int i=0; i<20; i++) { //try 10s
-      if (WiFi.status() == WL_CONNECTED) break;
-    delay(500);
-    Serial.print(".");
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-      Serial.println();
-      Serial.print("Connected, IP: ");
-      Serial.println(WiFi.localIP());
-      wifiConnectionActive = true;
-  } else {
-      Serial.println("Could not Connect to Wifi");
-      wifiConnectionActive = false;
-  }
+  //WIFi Multi
+#ifdef WIFI_CONFIG_H
+  WiFi.mode(WIFI_STA);
+  Serial.println("Setting up WiFi");
+
+  #ifdef WIFI_CONFIG_SSID_1
+  #ifndef WIFI_CONFIG_PASSWORD_1
+    wifiMulti.addAP(WIFI_CONFIG_SSID_1);
+  #else
+    wifiMulti.addAP(WIFI_CONFIG_SSID_1, WIFI_CONFIG_PASSWORD_1);
+  #endif
+  #endif
+
+  #ifdef WIFI_CONFIG_SSID_2
+  #ifndef WIFI_CONFIG_PASSWORD_2
+    wifiMulti.addAP(WIFI_CONFIG_SSID_2);
+  #else
+    wifiMulti.addAP(WIFI_CONFIG_SSID_2, WIFI_CONFIG_PASSWORD_2);
+  #endif
+  #endif
+
+  #ifdef WIFI_CONFIG_SSID_3
+  #ifndef WIFI_CONFIG_PASSWORD_3
+    wifiMulti.addAP(WIFI_CONFIG_SSID_3);
+  #else
+    wifiMulti.addAP(WIFI_CONFIG_SSID_3, WIFI_CONFIG_PASSWORD_3);
+  #endif
+  #endif
+
+  // InfluxDB
+  // Add constant tags - only once
+  influxsensors.addTag("location", "Schlafzimmer");
+
 #else
   Serial.println("No Wifi Info Present, Light Only Mode");
   wifiConnectionActive = false;
 #endif
-
-  mqttClient.setServer(MQTT_CONFIG_SERVER, 1883);
 
   // finished time of setup, used for initial calibration
   initalCalibrationStartTimeMS = millis();
@@ -184,32 +199,6 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  if (wifiConnectionActive && attemptMqttConnect && !mqttClient.connected()) {
-    char mqttClientID[9];
-    //Attempt to Connect 10 times with growing intervals
-    for (int retries = 0; retries < 10; retries++) {
-
-      // Generate mqttClientID
-      for (int i = 0; i < 8; i++) mqttClientID[i] = alphanum[random(51)];
-      mqttClientID[8]='\0';
-
-      if (mqttClient.connect(mqttClientID, MQTT_CONFIG_USER, MQTT_CONFIG_PASS)) {
-        Serial.println("MQTT: connected");
-        mqttConnectionActive = true;
-        attemptMqttConnect = true;
-        retries=10; //break the loop instantly
-      } else {
-        Serial.println(retries);
-        // Print reason the connection failed.
-        // See https://pubsubclient.knolleary.net/api.html#state for the failure code explanation.
-        Serial.print("failed, rc="); Serial.println(mqttClient.state());
-        mqttConnectionActive = false;
-        attemptMqttConnect = false;
-        delay(retries * 50);
-      }      
-    }
-  }
-
   switch (currentApplicationMode) {
   case MODE_INITIALIZATION:
     // may move into function
@@ -217,7 +206,7 @@ void loop() {
       if (now % 1000 == 0) {
         // NOTE: may use Serial.printf()
         Serial.print("Initial calibration in progress: ");
-        Serial.print((now - initalCalibrationStartTimeMS)/1000);
+        Serial.print((now - initalCalibrationStartTimeMS + 1000)/1000);
         Serial.print("/");
         Serial.print(CONF_WARMUP_TIME_MS/1000);
         Serial.println("s");
@@ -227,6 +216,7 @@ void loop() {
     }
     // change mode to measurement
     else {
+      Serial.println("Switch to measurement mode.");
       currentApplicationMode = MODE_MEASUREMENT;
     }
     break;
@@ -259,6 +249,7 @@ void loop() {
     }
     // zero calibration is done -> measurement mode
     else {
+      Serial.println("Switch to measurement mode.");
       currentApplicationMode = MODE_MEASUREMENT;
       // set send flag to true if we change again back to zero calibration mode
       sendZeroCalibrationCmd = true;
@@ -271,33 +262,78 @@ void loop() {
       int co2Value = mhz19Sensor.getCO2();
       float temperature = mhz19Sensor.getTemperature();
 
+      // continue loop on failed measurement
+      if (co2Value == 0) {
+        break;
+      }
+
+      influxsensors.clearFields();
       checkSensorReturnCode();
 
-      Serial.printf("CO2 [ppm]: %4i Temperature [C]: %.0f\n\r", co2Value, temperature);
+      Serial.printf("CO2 [ppm]: %4i, Temperature [C]: %.1f\n\r", co2Value, temperature);
 
       if (co2Value <= CO2_THRESHOLD_GOOD) {
-        colorWipe(neoPixels.Color(  0, 255,   0), 200);
+        colorWipe(neoPixels.Color(   44, 186,   0), 200);
       }
-      else if ((co2Value > CO2_THRESHOLD_GOOD) && (co2Value <= CO2_THRESHOLD_MEDIUM)) {
-        colorWipe(neoPixels.Color(  255, 255,   0), 200);
+      else if ((co2Value > CO2_THRESHOLD_GOOD) && (co2Value <= CO2_THRESHOLD_GOOD_MEDIUM)) {
+        colorWipe(neoPixels.Color(  163, 255,   0), 200);
       }
-      else if ((co2Value > CO2_THRESHOLD_MEDIUM) && (co2Value <= CO2_THRESHOLD_BAD)) {
-        colorWipe(neoPixels.Color(  255, 165,   0), 200);
+      else if ((co2Value > CO2_THRESHOLD_GOOD_MEDIUM) && (co2Value <= CO2_THRESHOLD_MEDIUM)) {
+        colorWipe(neoPixels.Color(  255, 244,   0), 200);
       }
-      else if (co2Value > CO2_THRESHOLD_BAD) {
-        colorWipe(neoPixels.Color(  255, 0,   0), 200);
+      else if ((co2Value > CO2_THRESHOLD_MEDIUM) && (co2Value <= CO2_THRESHOLD_MEDIUM_BAD)) {
+        colorWipe(neoPixels.Color(  255, 167,   0), 200);
+      }
+      else if ((co2Value > CO2_THRESHOLD_MEDIUM_BAD) && (co2Value <= CO2_THRESHOLD_BAD)) {
+        colorWipe(neoPixels.Color(  255,   0,   0), 200);
+      }
+      else if ((co2Value > CO2_THRESHOLD_BAD) && (co2Value <= CO2_THRESHOLD_DEAD)) {
+        colorWipe(neoPixels.Color(  255,   0, 127), 200);
+      }
+      else if (co2Value > CO2_THRESHOLD_DEAD) {
+        colorWipe(neoPixels.Color(  255,   0,  255), 200);
       }
 
-      //If We have Wifi and MQTT, send it
-      if (wifiConnectionActive && mqttConnectionActive) {
-        String json = String("{ \"temperatur\": " + String(temperature, 0) + ", \"ppmCO2\": " + String(co2Value) + " }");
-        //Serial.println(json);
-        String topic = String("/co2ampel/" + String(ESP.getChipId()));
-        //Serial.println(topic);
-        if (mqttClient.publish(topic.c_str(), json.c_str())) {
+//If We have Wifi and InfluxDB, send it
+#ifdef WIFI_CONFIG_H
+      //      wifiMulti.run(connectTimeout);
+
+      if (wifiMulti.run(connectTimeout) == WL_CONNECTED) {
+        Serial.print("Connected to wireless network '");
+        Serial.print(WiFi.SSID());
+        Serial.print("' with IP: ");
+        Serial.println(WiFi.localIP());
+        wifiConnectionActive = true;
+      } else {
+        Serial.println("Could not Connect to Wifi");
+        wifiConnectionActive = false;
+      }
+
+      // Check InfluxDB server connection
+      if (client.validateConnection()) {
+        Serial.print("Connected to InfluxDB: ");
+        Serial.println(client.getServerUrl());
+        influxdbConnectionActive = true;
+      } else {
+        Serial.print("InfluxDB connection failed: ");
+        Serial.println(client.getLastErrorMessage());
+        influxdbConnectionActive = false;
+      }
+
+      // InfluxDB
+      influxsensors.addField("co2", co2Value);
+      influxsensors.addField("temperature", temperature);
+
+      // Write point
+      if ((wifiConnectionActive) && (influxdbConnectionActive)) {
+        if (!client.writePoint(influxsensors)) {
+          Serial.print("InfluxDB write failed: ");
+          Serial.println(client.getLastErrorMessage());
+        } else {
           Serial.println("Send OK");
         }
       }
+#endif
 
       delay(10);
     }

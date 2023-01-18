@@ -4,4 +4,4 @@
 .vscode/launch.json
 .vscode/ipch
 src/wifi_config.h
-src/mqtt_config.h
+src/influxdb_config.h
