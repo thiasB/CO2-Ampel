@@ -21,6 +21,8 @@
 // InfluxDB config
 #include <influxdb_config.h>
 
+// Sensor location
+const char *location = "Schlafzimmer";
 
 // CO2 sensor configuration
 #define MHZ19_BAUDRATE  9600    // default baudrate of sensor
@@ -51,7 +53,7 @@
 #error Include a valid wifi_config.h
 #endif
 #ifndef INFLUXDB_CONFIG_H
-#error Include a valid wifi_config.h
+#error Include a valid influxdb_config.h
 #endif
 
 
@@ -71,7 +73,7 @@ ESP8266WiFiMulti wifiMulti;
 const uint32_t connectTimeout = 10000;
 
 // InfluxDB client
-InfluxDBClient client(INFLUXDB_SERVER, INFLUXDB_DATABASE);
+InfluxDBClient client;
 
 // InfluxDB Data point
 Point influxsensors("Sensoren");
@@ -184,8 +186,9 @@ void setup() {
   #endif
 
   // InfluxDB
+  client.setConnectionParamsV1(INFLUXDB_SERVER, INFLUXDB_DATABASE);
   // Add constant tags - only once
-  influxsensors.addTag("location", "Schlafzimmer");
+  influxsensors.addTag("location", location);
 
 #else
   Serial.println("No Wifi Info Present, Light Only Mode");
@@ -320,12 +323,10 @@ void loop() {
         influxdbConnectionActive = false;
       }
 
-      // InfluxDB
-      influxsensors.addField("co2", co2Value);
-      influxsensors.addField("temperature", temperature);
-
-      // Write point
+      // Write point to InfluxDB
       if ((wifiConnectionActive) && (influxdbConnectionActive)) {
+        influxsensors.addField("co2", co2Value);
+        influxsensors.addField("temperature", temperature);
         if (!client.writePoint(influxsensors)) {
           Serial.print("InfluxDB write failed: ");
           Serial.println(client.getLastErrorMessage());
