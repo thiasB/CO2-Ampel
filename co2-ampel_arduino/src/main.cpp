@@ -162,6 +162,8 @@ void setup() {
   Serial.println("Setting up WiFi");
 
   #ifdef WIFI_CONFIG_SSID_1
+  Serial.print(" Adding WiFi network: ");
+  Serial.println(WIFI_CONFIG_SSID_1);
   #ifndef WIFI_CONFIG_PASSWORD_1
     wifiMulti.addAP(WIFI_CONFIG_SSID_1);
   #else
@@ -170,6 +172,8 @@ void setup() {
   #endif
 
   #ifdef WIFI_CONFIG_SSID_2
+  Serial.print(" Adding WiFi network: ");
+  Serial.println(WIFI_CONFIG_SSID_2);
   #ifndef WIFI_CONFIG_PASSWORD_2
     wifiMulti.addAP(WIFI_CONFIG_SSID_2);
   #else
@@ -178,6 +182,8 @@ void setup() {
   #endif
 
   #ifdef WIFI_CONFIG_SSID_3
+  Serial.print(" Adding WiFi network: ");
+  Serial.println(WIFI_CONFIG_SSID_3);
   #ifndef WIFI_CONFIG_PASSWORD_3
     wifiMulti.addAP(WIFI_CONFIG_SSID_3);
   #else
